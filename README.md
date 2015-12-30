@@ -6,7 +6,10 @@ Simple REST Framework
 
 [![](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=X658UEM4KQ3YA)
 
-### Getting Started
+###Getting Started
+Requires
+ - **[X-Superobject](https://github.com/onryldz/x-superobject) Framework**
+
 Assuming you've already installed **expres** framework, create a WebBroker - Web Server Application to your project *(File -> New -> Other -> WebBroker -> Web Server Application)*.
 
 The following code must be inserted in the "WebModule.pas" which is automatically generated in the "DefaultHandlerAction" event.
