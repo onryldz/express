@@ -10,7 +10,7 @@ Simple REST Framework
 Requires
  - **[X-Superobject](https://github.com/onryldz/x-superobject) Framework**
 
-Assuming you've already installed **expres** framework, create a WebBroker - Web Server Application to your project *(File -> New -> Other -> WebBroker -> Web Server Application)*.
+Assuming you've already installed **express** framework, create a WebBroker - Web Server Application to your project *(File -> New -> Other -> WebBroker -> Web Server Application)*.
 
 The following code must be inserted in the "WebModule.pas" which is automatically generated in the "DefaultHandlerAction" event.
 
