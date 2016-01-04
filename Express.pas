@@ -28,6 +28,10 @@
 
 unit Express;
 
+{$IF CompilerVersion > 28}
+  {$DEFINE SYSTEM_HASH}
+{$ENDIF}
+
 interface
 
 uses
@@ -39,6 +43,9 @@ uses
   System.Rtti,
   System.Variants,
   System.TypInfo,
+  {$IFDEF SYSTEM_HASH}
+  System.Hash,
+  {$ENDIF}
   XSuperObject;
 
 type
@@ -286,7 +293,13 @@ begin
                      end,
                      function(const Value: String): Integer var S: String; begin
                         S := Value.ToLower;
-                        Result := BobJenkinsHash(PChar(S)^, SizeOf(Char) * Length(S), 0)
+                        Result :=
+                          {$IFDEF SYSTEM_HASH}
+                             System.Hash.THashBobJenkins.GetHashValue
+                          {$ELSE}
+                             BobJenkinsHash
+                          {$ENDIF}
+                             (PChar(S)^, SizeOf(Char) * Length(S), 0)
                      end));
   FHttpMethod := Method;
 end;
@@ -330,7 +343,13 @@ begin
                      end,
                      function(const Value: String): Integer var S: String; begin
                         S := Value.ToLower;
-                        Result := BobJenkinsHash(PChar(S)^, SizeOf(Char) * Length(S), 0)
+                        Result :=
+                          {$IFDEF SYSTEM_HASH}
+                             System.Hash.THashBobJenkins.GetHashValue
+                          {$ELSE}
+                             BobJenkinsHash
+                          {$ENDIF}
+                             (PChar(S)^, SizeOf(Char) * Length(S), 0)
                      end));
 end;
 
@@ -569,7 +588,7 @@ begin
        ExpRequest.Free;
        ExpResponse.Free;
      end;
-  end;
+  end else Response.StatusCode := 404;
 end;
 
 constructor TExpressApp.Create;
@@ -627,7 +646,6 @@ end;
 constructor TResponse.Create(Response: TWebResponse);
 begin
   FResponse := Response;
-  Self.GetInterfaceTable
 end;
 
 function TResponse.GetContentType: String;
@@ -677,7 +695,13 @@ begin
     end,
     function(const Value: String): Integer var S: String; begin
        S := Value.ToLower;
-       Result := BobJenkinsHash(PChar(S)^, SizeOf(Char) * Length(S), 0)
+       Result :=
+          {$IFDEF SYSTEM_HASH}
+             System.Hash.THashBobJenkins.GetHashValue
+          {$ELSE}
+             BobJenkinsHash
+          {$ENDIF}
+             (PChar(S)^, SizeOf(Char) * Length(S), 0)
     end
   ));
 
@@ -687,7 +711,13 @@ begin
     end,
     function(const Value: String): Integer var S: String; begin
        S := Value.ToLower;
-       Result := BobJenkinsHash(PChar(S)^, SizeOf(Char) * Length(S), 0)
+       Result :=
+          {$IFDEF SYSTEM_HASH}
+             System.Hash.THashBobJenkins.GetHashValue
+          {$ELSE}
+             BobJenkinsHash
+          {$ENDIF}
+             (PChar(S)^, SizeOf(Char) * Length(S), 0)
     end
   ));
 
@@ -793,8 +823,6 @@ begin
                      begin
                        Values := TList<TValue>.Create;
                        Instance := Meta.Create;
-                       TInject(Instance).FRequest := Req;
-                       TInject(Instance).FResponse := Res;
                        try
                          for I := 0 to High(Parameters) do begin
                              Parameter := Parameters[I];
@@ -865,6 +893,8 @@ begin
                      begin
                        Values := TList<TValue>.Create;
                        Instance := Meta.Create;
+                       TInject(Instance).FRequest := Req;
+                       TInject(Instance).FResponse := Res;
                        try
                          for I := 0 to High(Parameters) do begin
                              Parameter := Parameters[I];
