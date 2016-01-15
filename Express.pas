@@ -40,13 +40,16 @@ uses
   Generics.Collections,
   Generics.Defaults,
   Web.HTTPApp,
+  DateUtils,
   System.Rtti,
   System.Variants,
   System.TypInfo,
   {$IFDEF SYSTEM_HASH}
   System.Hash,
   {$ENDIF}
-  XSuperObject;
+  System.SyncObjs,
+  XSuperObject,
+  XSuperJson;
 
 type
  (*
@@ -54,12 +57,15 @@ type
   *)
   TStaticRouteLevel = class;
   TDynamicRouteLevel = class;
+  TSessionManager = class;
+  TSession = class;
 
  (*
   *  ATTRIBUTES
   *)
 
   THttpMethod = (hmGET, hmPUT, hmPOST, hmDELETE);
+  THttpMethodSet = set of THttpMethod;
 
   TCustomHttpMethodAttribute = class abstract(TCustomAttribute)
   private
@@ -141,6 +147,7 @@ type
     function GetParam(Key: String): String; inline;
   public
     constructor Create(URIInfo: TURIInfo; Parameters: PParameters; WebRequest: TWebRequest);
+    function HasSession: Boolean;
     property Params[Key: String]: String read GetParam;
     property WebRequest: TWebRequest read FWebRequest;
   end;
@@ -157,11 +164,14 @@ type
     procedure SendRecord<T: record>(const Rec: T);
     procedure SendObject(Obj: TObject);
     property ContentType: String read GetContentType write SetContentType;
+    property WebResponse: TWebResponse read FResponse;
   end;
 
   TExecution = reference to procedure(Req: TRequest; Res: TResponse);
   TAOPExecution = reference to procedure(Req: TRequest; Res: TResponse; var Next: Boolean);
+
  (* Route Classes *)
+
   TRouteLevel = class
   private
     FParent: TRouteLevel;
@@ -207,22 +217,33 @@ type
     destructor Destroy; override;
     procedure Add(Method: THttpMethod; const URI: String; Handle: TExecution); inline;
     procedure AddUse(Method: THttpMethod; const URI: String; Handle: TAOPExecution); inline;
-    function Resolve(Req: TWebRequest; Res: TWebResponse; Method: THttpMethod; URI: String; var Params: TArray<String>): TRouteLevel;
+    function Resolve(Req: TWebRequest; Res: TWebResponse; Method: THttpMethod; URI: String; var Params: TArray<String>; var InjectReject: Boolean): TRouteLevel;
   end;
 
-  TProvider = class
+  TAppBase = class
+  private
+    FRequest: TRequest;
+    FResponse: TResponse;
+    FSession: TSession;
+    function GetSession: TSession;
+  protected
+    procedure StartSession; virtual;
+    procedure EndSession; virtual;
+    property Request: TRequest read FRequest;
+    property Response: TResponse read FResponse;
+    property Session: TSession read GetSession;
+  end;
+
+  TProvider = class(TAppBase)
   end;
   TProviderClass = class of TProvider;
 
-  TInject = class
+  TInject = class(TAppBase)
   private
     FNext: Boolean;
-    FRequest: TRequest;
-    FResponse: TResponse;
   protected
     property Next: Boolean read FNext write FNext;
-    property Request: TRequest read FRequest;
-    property Response: TResponse read FResponse;
+
   end;
   TInjectClass = class of TInject;
 
@@ -246,10 +267,12 @@ type
   TExpressApp = class
   private
     FRoutes: TRouteManager;
+    FSessionManager: TSessionManager;
   public
     constructor Create;
     destructor Destroy; override;
-    procedure Use(Method: THttpMethod; const URI: String; Handle: TAOPExecution);
+    procedure Use(Method: THttpMethod; const URI: String; Handle: TAOPExecution); overload;
+    procedure Use(Methods: THttpMethodSet; const URI: String; Handle: TAOPExecution); overload;
     procedure Get(const URI: String; Handle: TExecution);
     procedure Put(const URI: String; Handle: TExecution);
     procedure Post(const URI: String; Handle: TExecution);
@@ -257,10 +280,53 @@ type
 
     procedure Call(Request: TWebRequest; Response: TWebResponse);
     property Routes: TRouteManager read FRoutes;
+    property Sessions: TSessionManager read FSessionManager;
+  end;
+
+
+  (*
+   * Session Classes
+  *)
+
+  TSession = class
+  private
+    FId: String;
+    FDict: TObjectDictionary<Pointer, TObject>;
+    type TSessionValue<T> = class
+      private
+        FData: TDictionary<String, T>;
+        function GetValue(const Name: String): T; inline;
+        procedure SetValue(const Name: String; const Value: T); inline;
+      public
+        constructor Create;
+        destructor Destroy; override;
+        property Value[const Name: String]: T read GetValue write SetValue; default;
+    end;
+  public
+    constructor Create(const Id: String);
+    destructor Destroy; override;
+    property Id: String read FId;
+    function Value<T>: TSessionValue<T>;
+  end;
+
+  TSessionManager = class
+  private
+    FCriticalSection: TCriticalSection;
+    FSessions: TDictionary<String, TSession>;
+    function GetSession(const Id: String): TSession;
+    procedure SetSession(const Id: String; const Value: TSession);
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure EndSession(Session: TSession);
+    property Session[const Id: String]: TSession read GetSession write SetSession; default;
   end;
 
 var
   App: TExpressApp;
+
+const
+  SESSION_ID = 'sessionId';
 
 implementation
 
@@ -292,7 +358,7 @@ begin
                         Result := CompareText(Left, Right) = 0;
                      end,
                      function(const Value: String): Integer var S: String; begin
-                        S := Value.ToLower;
+                        S := Value.ToLowerInvariant;
                         Result :=
                           {$IFDEF SYSTEM_HASH}
                              System.Hash.THashBobJenkins.GetHashValue
@@ -342,7 +408,7 @@ begin
                         Result := CompareText(Left, Right) = 0;
                      end,
                      function(const Value: String): Integer var S: String; begin
-                        S := Value.ToLower;
+                        S := Value.ToLowerInvariant;
                         Result :=
                           {$IFDEF SYSTEM_HASH}
                              System.Hash.THashBobJenkins.GetHashValue
@@ -447,7 +513,7 @@ begin
   inherited;
 end;
 
-function TRouteManager.Resolve(Req: TWebRequest; Res: TWebResponse; Method: THttpMethod; URI: String; var Params: TArray<String>): TRouteLevel;
+function TRouteManager.Resolve(Req: TWebRequest; Res: TWebResponse; Method: THttpMethod; URI: String; var Params: TArray<String>; var InjectReject: Boolean): TRouteLevel;
 var
   Level: String;
   NextLevel: TRouteLevel;
@@ -471,6 +537,7 @@ var
 
 begin
   Result := Nil;
+  InjectReject := False;
   Parameters := TList<String>.Create;
   try
     Result := FRootLevels[Method];
@@ -481,15 +548,19 @@ begin
            if Result.HasDynamics then begin
               Result := Result.DynamicChilds;
               Parameters.Add(Level);
-              if (Result.AOPHandle.Count > 0) and not Next(Result) then
+              if (Result.AOPHandle.Count > 0) and not Next(Result) then begin
+                 InjectReject := True;
                  Exit(Nil);
+              end;
            end else begin
               Exit(Nil);
            end;
 
         end else begin
-           if (NextLevel.AOPHandle.Count > 0) and not Next(NextLevel) then
-               Exit(Nil);
+           if (NextLevel.AOPHandle.Count > 0) and not Next(NextLevel) then begin
+              InjectReject := True;
+              Exit(Nil);
+           end;
            Result := NextLevel;
         end;
     end;
@@ -566,6 +637,7 @@ var
   Params: TParameters;
   ExpRequest: TRequest;
   ExpResponse: TResponse;
+  InjectReject: Boolean;
 begin
   if Request.Method = 'GET' then
      Method := hmGET
@@ -578,7 +650,7 @@ begin
   else
      raise Exception.CreateFmt('Unknown Http Method: "%s"', [Request.Method]);
 
-  Route := FRoutes.Resolve(Request, Response, Method, String(Request.PathInfo), Params);
+  Route := FRoutes.Resolve(Request, Response, Method, String(Request.PathInfo), Params, InjectReject);
   if Assigned(Route) and Assigned(Route.Handle) then begin
      ExpRequest := TRequest.Create(Route.URIInfo, @Params, Request);
      ExpResponse := TResponse.Create(Response);
@@ -588,17 +660,23 @@ begin
        ExpRequest.Free;
        ExpResponse.Free;
      end;
-  end else Response.StatusCode := 404;
+  end else if not InjectReject then begin
+     Response.Content := '';
+     Response.ContentLength := 0;
+     Response.StatusCode := 404;
+  end;
 end;
 
 constructor TExpressApp.Create;
 begin
   FRoutes := TRouteManager.Create;
+  FSessionManager := TSessionManager.Create;
 end;
 
 destructor TExpressApp.Destroy;
 begin
   FRoutes.Free;
+  FSessionManager.Free;
   inherited;
 end;
 
@@ -622,6 +700,14 @@ begin
   Routes.Add(hmPUT, URI, Handle);
 end;
 
+procedure TExpressApp.Use(Methods: THttpMethodSet; const URI: String; Handle: TAOPExecution);
+var
+  Method: THttpMethod;
+begin
+  for Method in Methods do
+      Use(Method, URI, Handle);
+end;
+
 procedure TExpressApp.Use(Method: THttpMethod; const URI: String; Handle: TAOPExecution);
 begin
   Routes.AddUse(Method, URI, Handle);
@@ -639,6 +725,15 @@ end;
 function TRequest.GetParam(Key: String): String;
 begin
   Result := FParams^[FURIInfo.ParamIndex[Key]];
+end;
+
+function TRequest.HasSession: Boolean;
+var
+  SessionId: String;
+begin
+  SessionId := FWebRequest.CookieFields.Values[SESSION_ID];
+  if SessionID = '' then Exit(False);
+  Result := App.Sessions[SessionId] <> Nil;
 end;
 
 { TResponse }
@@ -669,15 +764,9 @@ begin
 end;
 
 procedure TResponse.SendTValue(const Data: TValue);
-var
-  Json: ISuperObject;
 begin
-  if Data.Kind = tkRecord then begin
-     Json := TSuperObject.Create;
-     TSerializeParse.ReadRecord(Data.TypeInfo, Data.GetReferenceToRawData, Json);
-     Send(Json.AsJSON(False, True))
-  end else
-     Send(VarToStr(Data.AsVariant));
+  ContentType := 'application/json';
+  Send(TJSON.Stringify(Data));
 end;
 
 procedure TResponse.SetContentType(const Value: String);
@@ -694,7 +783,7 @@ begin
        Result := CompareText(Left, Right) = 0;
     end,
     function(const Value: String): Integer var S: String; begin
-       S := Value.ToLower;
+       S := Value.ToLowerInvariant;
        Result :=
           {$IFDEF SYSTEM_HASH}
              System.Hash.THashBobJenkins.GetHashValue
@@ -710,7 +799,7 @@ begin
        Result := CompareText(Left, Right) = 0;
     end,
     function(const Value: String): Integer var S: String; begin
-       S := Value.ToLower;
+       S := Value.ToLowerInvariant;
        Result :=
           {$IFDEF SYSTEM_HASH}
              System.Hash.THashBobJenkins.GetHashValue
@@ -823,6 +912,8 @@ begin
                      begin
                        Values := TList<TValue>.Create;
                        Instance := Meta.Create;
+                       TAppBase(Instance).FRequest := Req;
+                       TAppBase(Instance).FResponse := Res;
                        try
                          for I := 0 to High(Parameters) do begin
                              Parameter := Parameters[I];
@@ -893,8 +984,8 @@ begin
                      begin
                        Values := TList<TValue>.Create;
                        Instance := Meta.Create;
-                       TInject(Instance).FRequest := Req;
-                       TInject(Instance).FResponse := Res;
+                       TAppBase(Instance).FRequest := Req;
+                       TAppBase(Instance).FResponse := Res;
                        try
                          for I := 0 to High(Parameters) do begin
                              Parameter := Parameters[I];
@@ -1013,7 +1104,9 @@ begin
                       ContentParam := cpRecord
                    else if Parameter.ParamType.TypeKind = tkClass then
                       ContentParam := cpClass;
-                   Continue;
+
+                   if ContentParam <> cpNone then
+                      Continue;
                 end;
                 Params := Params + '/:' + Parameter.Name;
             end;
@@ -1074,6 +1167,138 @@ begin
     TValue.Make(Ptr, TypInf, Result);
   except
     FreeMem(Ptr, Size);
+  end;
+end;
+
+
+{ TSession.TSessionValue<T> }
+
+constructor TSession.TSessionValue<T>.Create;
+begin
+  FData := TDictionary<String, T>.Create;
+end;
+
+destructor TSession.TSessionValue<T>.Destroy;
+begin
+  FData.Free;
+  inherited;
+end;
+
+function TSession.TSessionValue<T>.GetValue(const Name: String): T;
+begin
+  FData.TryGetValue(Name, Result);
+end;
+
+procedure TSession.TSessionValue<T>.SetValue(const Name: String; const Value: T);
+begin
+  if FData.ContainsKey(Name) then
+     FData[Name]:= Value
+  else FData.Add(Name, Value);
+end;
+
+{ TSessionManager }
+
+constructor TSessionManager.Create;
+begin
+  FCriticalSection := TCriticalSection.Create;
+  FSessions := TObjectDictionary<String, TSession>.Create([doOwnsValues]);
+end;
+
+destructor TSessionManager.Destroy;
+begin
+  FCriticalSection.Free;
+  FSessions.Free;
+  inherited;
+end;
+
+procedure TSessionManager.EndSession(Session: TSession);
+begin
+  FSessions.Remove(Session.Id);
+end;
+
+function TSessionManager.GetSession(const Id: String): TSession;
+begin
+  FSessions.TryGetValue(Id, Result);
+end;
+
+procedure TSessionManager.SetSession(const Id: String; const Value: TSession);
+begin
+  FCriticalSection.Enter;
+  try
+    FSessions.Remove(Id);
+    FSessions.Add(Id, Value);
+  finally
+    FCriticalSection.Leave;
+  end;
+end;
+
+{ TSession }
+
+constructor TSession.Create(const Id: String);
+begin
+  FId := Id;
+  FDict := TObjectDictionary<Pointer, TObject>.Create([doOwnsValues]);
+end;
+
+destructor TSession.Destroy;
+begin
+  FDict.Free;
+  inherited;
+end;
+
+function TSession.Value<T>: TSessionValue<T>;
+var
+  Value: TObject;
+begin
+  if not FDict.TryGetValue(TypeInfo(T), Value) then begin
+     Value := TSessionValue<T>.Create;
+     FDict.Add(TypeInfo(T), Value);
+  end;
+  Result := TSessionValue<T>(Value);
+end;
+
+{ TAppBase }
+
+procedure TAppBase.EndSession;
+var
+  I: Integer;
+  Cookie: TCookie;
+begin
+  if Session <> Nil then begin
+     App.Sessions.EndSession(Session);
+     with FResponse.WebResponse.Cookies.Add do begin
+          Name := SESSION_ID;
+          Value := '';
+          Path := '/';
+          Expires := -1;
+     end;
+  end;
+end;
+
+function TAppBase.GetSession: TSession;
+begin
+  if FSession = Nil then
+     FSession := App.Sessions[FRequest.WebRequest.CookieFields.Values[SESSION_ID]];
+  Result := FSession;
+end;
+
+
+procedure TAppBase.StartSession;
+var
+  SessionId: TGUID;
+  SessionIdStr: String;
+begin
+  if Session = Nil then begin
+     SessionId := TGuid.NewGuid;
+     SessionIdStr := SessionId.ToString.Replace('{', '').Replace('}', '');
+     with FResponse.WebResponse.Cookies.Add do begin
+          Name := SESSION_ID;
+          Value := SessionIdStr;
+          Path := '/';
+          Expires := DateUtils.IncHour(Now, 24);
+     end;
+     FSession := TSession.Create(SessionIdStr);
+     App.Sessions[SessionIdStr] := FSession;
   end;
 end;
 
