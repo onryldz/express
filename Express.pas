@@ -44,6 +44,7 @@ uses
   System.Rtti,
   System.Variants,
   System.TypInfo,
+  DB,
   {$IFDEF SYSTEM_HASH}
   System.Hash,
   {$ENDIF}
@@ -163,6 +164,7 @@ type
     procedure SendTValue(const Data: TValue);
     procedure SendRecord<T: record>(const Rec: T);
     procedure SendObject(Obj: TObject);
+    procedure SendDataSet(Obj: TObject);
     property ContentType: String read GetContentType write SetContentType;
     property WebResponse: TWebResponse read FResponse;
   end;
@@ -753,6 +755,14 @@ begin
   FResponse.Content := Data;
 end;
 
+procedure TResponse.SendDataSet(Obj: TObject);
+begin
+  ContentType := 'application/json';
+  if Obj = Nil then
+     Send('[]')
+  else Send(TJSON.Stringify(TDataSet(Obj)));
+end;
+
 procedure TResponse.SendObject(Obj: TObject);
 begin
   Send(Obj.AsJSON(False, True));
@@ -898,7 +908,10 @@ type
   end;
 
 function ClassDelegate(Meta: TClass; Method: TRttiMethod; ContentParam: TContentParameter; Parameters: TArray<TRttiParameter>): TClassDelegate;
+var
+  ReturnIsDataSet: Boolean;
 begin
+  ReturnIsDataSet := Method.ReturnType.IsInstance and Method.ReturnType.AsInstance.MetaclassType.InheritsFrom(TDataSet);
   Result.InjectHandle := Nil;
   Result.Handle := procedure(Req: TRequest; Res: TResponse)
                      var
@@ -955,7 +968,9 @@ begin
                          end;
 
                           Return := Method.Invoke(Instance, Values.ToArray);
-                          Res.SendTValue(Return);
+                          if ReturnIsDataSet then
+                             Res.SendDataSet(Return.AsObject)
+                          else Res.SendTValue(Return);
                           if Return.IsObject then
                              Return.AsObject.Free;
                        finally
@@ -969,8 +984,10 @@ end;
 
 
 function InjectClassDelegate(Meta: TClass; Method: TRttiMethod; ContentParam: TContentParameter; Parameters: TArray<TRttiParameter>): TClassDelegate;
+var
+  ReturnIsDataSet: Boolean;
 begin
-
+  ReturnIsDataSet := Method.ReturnType.IsInstance and Method.ReturnType.AsInstance.MetaclassType.InheritsFrom(TDataSet);
   Result.Handle := Nil;
   Result.InjectHandle := procedure(Req: TRequest; Res: TResponse; var Next: Boolean)
                      var
@@ -1027,12 +1044,14 @@ begin
                          end;
 
                           Return := Method.Invoke(Instance, Values.ToArray);
-                          Res.SendTValue(Return);
+                          Next := TInject(Instance).Next;
+                          if not Next then begin
+                             if ReturnIsDataSet then
+                                Res.SendDataSet(Return.AsObject)
+                             else Res.SendTValue(Return);
+                          end;
                           if Return.IsObject then
                              Return.AsObject.Free;
-
-                          Next := TInject(Instance).Next;
-
                        finally
                          Values.Free;
                          Instance.Free;
